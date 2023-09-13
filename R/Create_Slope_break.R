@@ -111,7 +111,6 @@ calculateSlopeBreaks <- function(rasterObj) {
           if (pixelValue < minPixelValue) {
             minPixelValue <- pixelValue
             minStep <- step
-            
           } else {
             bufferCount <- bufferCount + 1  # Increase the buffer count
             
