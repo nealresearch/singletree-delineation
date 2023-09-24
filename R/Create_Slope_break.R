@@ -99,12 +99,12 @@ calculateSlopeBreaks <- function(rasterObj) {
           pixelValue <- rasterObj[r_step, c_step]
           
           # Skip if the pixel value is zero
-          # if (centralPixelValue == 0) {
-          #   next
-          # }
+          if (centralPixelValue == 0) {
+            next
+          }
           
           # Check if the surrounding pixel is greater than the central pixel
-          if (pixelValue <= centralPixelValue) {
+          else if (pixelValue < centralPixelValue) {
             allGreater <- FALSE
           }
           
@@ -112,12 +112,7 @@ calculateSlopeBreaks <- function(rasterObj) {
             minPixelValue <- pixelValue
             minStep <- step
           } else {
-            bufferCount <- bufferCount + 1  # Increase the buffer count
-            
-            # If the buffer count reaches a threshold (e.g., 3), break the loop
-            if (bufferCount >= 3) {
-              break
-            }
+            break
           }
         }
         
@@ -147,4 +142,4 @@ rasterObj <- raster(matrix(runif(100), 10, 10))
 windowSizes <- calculateSlopeBreaks(chm)
 crs(windowSizes) <- crs_chm
 extent(windowSizes) <- c(las@header$`Min X`,las@header$`Max X`,las@header$`Min Y`, las@header$`Max Y`)
-writeRaster(windowSizes, "M:\\lidar\\Test\\result\\test_correct_code1.tif", overwrite = TRUE)
+writeRaster(windowSizes, "M:\\lidar\\Test\\chm\\all_result\\test.tif", overwrite = TRUE)
