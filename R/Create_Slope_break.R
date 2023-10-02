@@ -32,22 +32,7 @@ chm <- raster(chm_raster[,,1])
 chm[chm < 0] <- 0
 extent(chm) <- c(las@header$`Min X`,las@header$`Max X`,las@header$`Min Y`, las@header$`Max Y`)
 crs(chm) <- crs_chm
-# writeRaster(chm, "M:\\lidar\\Test\\chm\\chm.tif", overwrite = TRUE)
 
-# chm_raster <- as.array(chm_final)
-# 
-# # Morphological Operations
-# k <- shapeKernel(c(3,3), type="disc")
-# close_chm <- closing(chm_raster, k)
-# opening_chm <- opening(close_chm, k)
-# 
-# # Handling infinite values
-# opening_chm[is.infinite(opening_chm)] <- 0
-# chm <- raster(opening_chm[,,1])
-
-# Define the extent and CRS
-# extent(chm) <- c(las@header$`Min X`,las@header$`Max X`,las@header$`Min Y`, las@header$`Max Y`)
-# crs(chm) <- crs_chm
 
 calculateSlopeBreaks <- function(rasterObj) {
   rows <- nrow(rasterObj)
