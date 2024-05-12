@@ -1,0 +1,165 @@
+ library("lidR")
+library("raster")
+library(dplyr)
+library(RANN)
+library(rgdal)
+library(terra)
+library(sf)
+library(mmand)
+library(ggplot2)
+library(parallel)
+
+
+# Read LAS file and set CRS
+las <- readLAS("croped.laz")
+validation_points <- read_sf("new_croped.shp")
+ttops <- read_sf("ttops_orginal_BBM.shp")
+
+
+st_crs(las) <- 25833
+chm_canopy <-
+  rasterize_canopy(las, res = 1, p2r(0.9), na.fill = kriging())
+plot(chm_canopy)
+crs_chm <- crs(chm_canopy)
+gf_0.3 <- focalWeight(chm_canopy, 0.7, "Gauss")
+chm_smooth_0.3 <- focal(chm_canopy, w = gf_0.3)
+
+gf_0.4 <- focalWeight(chm_canopy, 0.7, "Gauss")
+chm_smooth_0.4 <- focal(chm_canopy, w = gf_0.4)
+
+chm_final <- ifel(chm_canopy <= 5, chm_smooth_0.3, chm_smooth_0.4)
+chm_final[is.na(chm_final)] <- 0
+
+chm <- raster::raster(chm_canopy)
+extent(chm) <- c(las@header$`Min X`,las@header$`Max X`,las@header$`Min Y`, las@header$`Max Y`)
+crs(chm) <- crs_chm
+
+# writeRaster(chm, "M:\\lidar\\validation\\test\\building_chm.tif")
+
+
+
+ttops_df <- st_set_geometry(ttops, NULL)
+
+ttops_coords <- st_coordinates(ttops)[, 1:2] # assuming columns 1 and 2 are your X and Y coordinates
+ttops_sp <- SpatialPointsDataFrame(ttops_coords, ttops_df)
+mcws_segments_grid <- (ForestTools::mcws(ttops_sp, chm, format="POLYGONS"))
+
+las_sf <- st_as_sf(las)
+st_crs(las_sf) <- 25833
+mcws_segments_grid_sf <- st_as_sf(mcws_segments_grid)
+st_crs(mcws_segments_grid_sf) <- 25833
+
+
+cl <- makeCluster(30)
+
+# Initialize empty vectors for diameter and lidar_points_count
+max_diameter <- numeric(length(mcws_segments_grid_sf))
+min_diameter <- numeric(length(mcws_segments_grid_sf))
+lidar_points_count <- numeric(length(mcws_segments_grid_sf))
+crown_diameter <- numeric(length(mcws_segments_grid_sf))
+Baum_height <- numeric(length(mcws_segments_grid_sf))
+
+diameter_polygon <- function(x){
+  # Calculate distances
+  distances_matrix <- x %>% 
+    st_cast('MULTIPOINT') %>% 
+    st_cast('POINT') %>% 
+    st_distance()
+  
+  # Convert distance matrix to a numeric vector
+  distances_vector <- as.vector(distances_matrix)
+  
+  # Ensure distances are numeric
+  numeric_distances <- as.numeric(distances_vector)
+  
+  
+  
+  # Calculate max and quantile distances
+  max_distance <- mean(numeric_distances)
+  min_distance <- unname(quantile(numeric_distances, probs = seq(0, 1, 0.10)))
+  min_dist <- min_distance
+  # Return values
+  return(list(min_dist, max_distance))
+}
+
+# Function to calculate the diameter
+calculate_diameter <- function(polygon) {
+  distance_poly <- diameter_polygon(polygon)
+  max_diameter <- distance_poly[[2]]
+  min_diameter <- distance_poly[[1]][2]
+  
+  points_within <- st_within(validation_points, polygon, sparse = FALSE)
+  val <- unname(which(points_within, arr.ind = TRUE)[, 'row']) #Get the index of the row where the value is true
+  if (length(val) == 0)
+  {
+    crown_diameter = 0
+    Baum_height = 0
+  }
+  
+  valid_df <- select(validation_points[val, ], kr_durchm, baumhoehe)
+  crown <- st_drop_geometry(valid_df)
+  row <- nrow(crown)
+  
+  if (row > 1){
+    mean_crown <- mean(crown$kr_durchm)
+    Baum_height = mean(crown$baumhoehe)
+    crown_diameter = mean_crown
+  }
+  else{
+    crown_diam <- crown$kr_durchm[1]
+    tree_height <- crown$baumhoehe[1]
+    
+    Baum_height <- tree_height 
+    crown_diameter = crown_diam
+  }
+ 
+  
+  return(list(maxdiameter = max_diameter, mindiameter = min_diameter, vdiameter = crown_diameter, vheight = Baum_height))
+}
+
+# Function to calculate the lidar points count
+calculate_lidar_points_count <- function(polygon, las_sf) {
+  points_within <- st_within(las_sf, polygon, sparse = FALSE)
+  lidar_points_count <- sum(points_within)
+  
+  return(lidar_points_count)
+}
+
+# Function to combine the results
+combine_results <- function(diameters, counts) {
+  results_df <- data.frame(meandiameter = diameters$maxdiameter, mindiameter = diameters$mindiameter, vdiameter = diameters$vdiameter, vheight = diameters$vheight, lidar_points_count = counts)
+  return(results_df)
+}
+
+# Export the necessary objects to the cluster
+clusterExport(cl, c("calculate_diameter", "calculate_lidar_points_count" ,"las_sf", "diameter_polygon","mcws_segments_grid_sf", "validation_points","select"))
+
+clusterEvalQ(cl, {
+  library(dplyr)
+  library("lidR")
+  library("raster")
+  library(terra)
+  library(sf)
+  # Load any other necessary packages here
+})
+
+# Apply the diameter calculation
+diameters <- parLapply(cl, seq_len(nrow(mcws_segments_grid_sf)), function(i) {
+  calculate_diameter(mcws_segments_grid_sf[i,])
+})
+
+# Apply the lidar points count calculation
+lidar_counts <- parLapply(cl, seq_len(nrow(mcws_segments_grid_sf)), function(i) {
+  calculate_lidar_points_count(mcws_segments_grid_sf[i,], las_sf)
+})
+
+# Combine the results
+combined_results <- Map(combine_results, diameters, lidar_counts)
+
+# Convert results to a data frame and bind with mcws_segments_grid_sf
+res <- do.call(rbind, combined_results)
+mcws_segments_grid_sf <- cbind(mcws_segments_grid_sf, res)
+treetops_sf <- sf::st_as_sf(mcws_segments_grid_sf)
+st_crs(treetops_sf) <- 25833
+sf::st_write(treetops_sf, "BB1.shp", overwrite = TRUE)
+gc()
