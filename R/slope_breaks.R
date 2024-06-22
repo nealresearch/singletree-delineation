@@ -37,52 +37,91 @@ extent(chm) <- c(las@header$`Min X`,las@header$`Max X`,las@header$`Min Y`, las@h
 crs(chm) <- crs_chm
 chm[chm < 0] <- 0
 
-# Function to calculate slope breaks
 calculateSlopeBreaks <- function(rasterObj) {
   rows <- nrow(rasterObj)
   cols <- ncol(rasterObj)
   
-  # Create a raster object to store the window sizes
+  # Resulting raster with custom window sizes
   windowRaster <- raster(nrows = rows, ncols = cols)
   
-  # Define the eight cardinal directions
+  # Define directions for the eight cardinal directions
   directions <- list(c(0,1), c(1,1), c(1,0), c(1,-1), c(0,-1), c(-1,-1), c(-1,0), c(-1,1))
   
-  # Loop through each pixel in the raster object
   for (r in 1:rows) {
     for (c in 1:cols) {
       
-      # Get the value of the current central pixel
-      centralPixelValue <- rasterObj[r,c]
+      centralPixelValue <- rasterObj[r, c]
       slopeBreaks <- numeric(length(directions))
       
-      # Loop through the cardinal directions
+      isEdgePixel <- (r == 1 || r == rows || c == 1 || c == cols)
+      allGreater <- TRUE  # Initialize to check if all surrounding pixels are greater
+      
+      isTreeEdgePixel <- FALSE  # Initialize the flag
+      
       for (d in 1:length(directions)) {
         direction <- directions[[d]]
         r_offset <- direction[1]
         c_offset <- direction[2]
         
-        # Move in the current direction until a lower value is found
+        minPixelValue <- centralPixelValue
+        minStep <- 0
+        
+        r_step <- r + r_offset
+        c_step <- c + c_offset
+        if (r_step >= 1 && r_step <= rows && c_step >= 1 && c_step <= cols) {
+          pixelValue <- rasterObj[r_step, c_step]
+          
+          if (pixelValue == 0) {
+            isTreeEdgePixel <- TRUE
+            break
+          }
+        }
+        # Move in the direction to find the minimum value
         for (step in 1:max(rows, cols)) {
           r_step <- r + step * r_offset
           c_step <- c + step * c_offset
           
-          # Check bounds of the raster
           if (r_step < 1 || r_step > rows || c_step < 1 || c_step > cols) break
           
-          # Get the value of the neighboring pixel
           pixelValue <- rasterObj[r_step, c_step]
           
-          # Check if a break in slope is found
-          if (pixelValue < centralPixelValue) {
-            slopeBreaks[d] <- step
-            break
+          # Skip if the pixel value is zero
+          if (centralPixelValue == 0) {
+            next
+          }
+          
+          # Check if the surrounding pixel is greater than the central pixel
+          else if (pixelValue < centralPixelValue) {
+            allGreater <- FALSE
+          }
+          
+          if (pixelValue < minPixelValue) {
+            minPixelValue <- pixelValue
+            minStep <- step
+          } else {
+            highPixelValue <- pixelValue
+            if ((highPixelValue - minPixelValue) >= 0.5){
+              break
+            } else{
+              minStep <- step
+            }
           }
         }
+        
+        # Store the number of steps it took to find the minimum value pixel
+        slopeBreaks[d] <- minStep
+        print(minStep)
+      }
+      if (isTreeEdgePixel) {
+        windowSize <- 0
+      }
+      # Special case for edge pixels
+      if (isEdgePixel && allGreater) {
+        windowSize <- 0
+      } else {
+        windowSize <- (mean(slopeBreaks) * 0.5)
       }
       
-      # Calculate the mean value of breaks or assign zero if none found
-      windowSize <- if (all(slopeBreaks == 0)) 0 else mean(slopeBreaks[slopeBreaks > 0])
       windowRaster[r, c] <- windowSize
     }
   }
