@@ -1,0 +1,34 @@
+band_count <- 10
+# Selecting rows with NA values using complete.cases
+na_index <- which(is.na(raster), arr.ind = TRUE)
+x <- function(raster){
+  
+  foreach(row = 1:nrow(na_index)) %do% {
+    rows_1 <- na_index[row, 1]  # Row index of NA
+    cat("row", rows_1)
+    cols_na <- na_index[row, 2]  # Column index of NA
+    # Initialize val1 and val2
+    val1 <- 0
+    val2 <- 0
+    tryCatch({
+      cols_1 <- cols_na + band_count 
+      if (cols_1 <= ncol(raster)) {  
+        val1 <- raster[rows_1, cols_1]
+      }
+    }, error = function(e) {
+      cat("Error occurred while accessing val1:", conditionMessage(e), "\n")
+    })
+    tryCatch({
+      cols_2 <- cols_na - band_count 
+      if (cols_2 > 0) {  
+        val2 <- raster[rows_1, cols_2]
+      }
+    }, error = function(e) {
+      cat("Error occurred while accessing val2:", conditionMessage(e), "\n")
+    })
+    mean_val <- mean(c(val1, val2), na.rm = TRUE)  
+    raster[rows_1, cols_na] <- mean_val  
+  }
+  return (raster)
+  
+}
