@@ -1,34 +1,107 @@
-band_count <- 10
-# Selecting rows with NA values using complete.cases
-na_index <- which(is.na(raster), arr.ind = TRUE)
-x <- function(raster){
+library(raster)
+library(foreach)
+library(doParallel)
+
+cl <- makeCluster(4)
+registerDoParallel(cl)
+
+
+image_path <- "M:\\spectral-unmixing\\test\\"
+filename <- list.files(image_path)
+
+
+df_list <- foreach(rfile = filename, .combine = cbind, .packages = c("raster")) %dopar% {
+  ras <- stack(paste0(image_path, rfile))
+  df1 <- as.data.frame(ras, xy=TRUE)
+  drops <- c("x","y")
+  df1 <- df1[ , !(names(df1) %in% drops)]
+  colnames(df1) <- c("band1", "band2","band3", "band4", "band5", "band6", "band7", "band8", "band9", "band10")
+
+  return (df1)
+}
+
+x_parallel <- function(raster, band_count = 10) {
   
-  foreach(row = 1:nrow(na_index)) %do% {
-    rows_1 <- na_index[row, 1]  # Row index of NA
-    cat("row", rows_1)
-    cols_na <- na_index[row, 2]  # Column index of NA
-    # Initialize val1 and val2
-    val1 <- 0
-    val2 <- 0
-    tryCatch({
-      cols_1 <- cols_na + band_count 
-      if (cols_1 <= ncol(raster)) {  
-        val1 <- raster[rows_1, cols_1]
-      }
-    }, error = function(e) {
-      cat("Error occurred while accessing val1:", conditionMessage(e), "\n")
-    })
-    tryCatch({
-      cols_2 <- cols_na - band_count 
-      if (cols_2 > 0) {  
-        val2 <- raster[rows_1, cols_2]
-      }
-    }, error = function(e) {
-      cat("Error occurred while accessing val2:", conditionMessage(e), "\n")
-    })
-    mean_val <- mean(c(val1, val2), na.rm = TRUE)  
-    raster[rows_1, cols_na] <- mean_val  
+  # Helper to find the next non‐NA in a given direction
+  findNearestNonNA <- function(row_data, col_idx, step) {
+    new_col <- col_idx + step
+    while (new_col > 0 && new_col <= length(row_data) && is.na(row_data[new_col])) {
+      new_col <- new_col + step
+    }
+    if (new_col <= 0 || new_col > length(row_data) || is.na(row_data[new_col])) {
+      return(NA)
+    } else {
+      return(row_data[new_col])
+    }
   }
-  return (raster)
   
+  # Set up parallel back end
+  cores <- detectCores()
+  cl <- makeCluster(cores - 1) 
+  registerDoParallel(cl)
+  
+  # Identify only the rows that need fixing
+  rows_to_fix <- which(apply(raster, 1, function(row) any(is.na(row) | abs(row - (-3.2768)) < 1e-6)))
+  
+  raster_fixed  <- raster
+  # Process each row in parallel
+  fixed_rows <- foreach(r = rows_to_fix, .combine=rbind) %dopar% {
+    row_data <- raster[r, ]
+    na_cols <- which(is.na(row_data) | abs(row_data - (-3.2768)) < 1e-6)
+    if (length(na_cols) == 0) {
+      # Nothing to fix
+      row_data
+    } else {
+      for (c_na in na_cols) {
+        val1 <- findNearestNonNA(row_data, c_na, +band_count)
+        val2 <- findNearestNonNA(row_data, c_na, -band_count)
+        if (!is.na(val1) && !is.na(val2)) {
+          row_data[c_na] <- mean(c(val1, val2))
+        } else if (!is.na(val1)) {
+          row_data[c_na] <- val1
+        } else if (!is.na(val2)) {
+          row_data[c_na] <- val2
+        }
+      }
+      row_data
+    }
+  }
+  
+  stopCluster(cl)
+  # Put the fixed rows back into the full raster
+  raster_fixed[rows_to_fix, ] <- fixed_rows # Clean up
+  return(raster_fixed)
+}
+
+
+
+# 1) Run the interpolation on the combined dataframe
+df_interpolated <- x_parallel(df_list, band_count = 10)
+
+# 2) Split into single images (10 columns per image) and save
+for(i in seq_along(filename)) {
+  
+  # Read original file so we can match its raster shape & coordinate info
+  base_ras <- stack(file.path(image_path, filename[i]))
+  
+  # We'll re-extract x,y from 'base_ras' so we can rebuild a RasterBrick
+  df_xy    <- as.data.frame(base_ras, xy = TRUE)[, c("x","y")]
+  
+  # Select the 10 columns corresponding to this image
+  start_col <- (i-1)*10 + 1
+  end_col   <- i*10
+  sub_df    <- df_interpolated[, start_col:end_col]
+  
+  # Name the bands so the output has clear layer names
+  colnames(sub_df) <- paste0("band", 1:10)
+  
+  # Combine x, y with our 10-band data
+  final_df <- cbind(df_xy, sub_df)
+  
+  # Convert to a RasterBrick with 10 layers
+  rbrick <- rasterFromXYZ(final_df, crs = crs(base_ras))
+  
+  # Write out a new file (change name/path as desired)
+  #out_name <- paste0("interpolated_", filename[i])
+  #writeRaster(rbrick, filename = file.path(image_path, out_name), overwrite=TRUE)
 }
