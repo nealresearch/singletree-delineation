@@ -1,0 +1,101 @@
+library(raster)
+library(lubridate)
+library(foreach)
+library(randomForest)
+library(doParallel)
+library(glcm)
+
+# Define the function to get pixel values from a raster at specific coordinates
+getPixelValues <- function(raster, x, y) {
+  # Check if input is a raster stack or brick
+  # if (!is(raster, "RasterStack") && !is(raster, "RasterBrick")) {
+  #   stop("Input must be a RasterStack or RasterBrick")
+  # }
+  # Extract values
+  values <- extract(raster, cbind(x, y))
+  return(values)
+}
+
+
+get_matrix <- function(current_raster,x, y, num=10){
+  # Pre-allocate a matrix to hold the results
+  num_bands <- nlayers(current_raster)
+  result_matrix <- matrix(NA, nrow = length(x), ncol = num_bands)
+  # Populate the matrix with pixel values
+  for (i in 1:length(x)) {
+    # Get pixel values at specified coordinates
+    pixel_values <- getPixelValues(current_raster, x[i], y[i])
+    # Store the values in the corresponding row of the matrix
+    result_matrix[i, ] <- pixel_values
+  }
+  # Convert the result matrix to a dataframe
+  result_df <- as.data.frame(result_matrix)
+  # Naming the columns as Band1, Band2, ..., BandN
+  if (num_bands > 2) {
+    names(result_df) <- paste0("Band", 1:num_bands)
+  } else{
+    names(result_df) <- paste0("Band", num)
+  }
+  return (result_df)
+}
+
+
+# Green chlorophyll index (GCI)
+GCI <- function(img) {
+  B2 <- img[[2]] # green
+  B7 <- img[[7]] # NIR
+  
+  return((B7/B2)-1)
+}
+
+#Optimized Soil Adjusted Vegetation Index (OSAVI)
+osavi <- function(img){
+  B7 <- img[[7]] #NIR
+  B3 <- img[[3]]
+  return((B7-B3)/(B7+B3+0.16))
+}
+
+#Red-Edge Position Index (REP)
+repi <- function(img){
+  B4 <- img[[4]]  # Red Edge 1 (original B5)
+  B3 <- img[[3]]  # Red (original B4)
+  return((B4 - B3) / (B4 + B3))
+}
+
+#NDVI - Normalized Difference Vegetation Index
+ndvi <- function(img) {
+  B3 <- img[[3]]  # Red (original B4)
+  B7 <- img[[7]]  # NIR (original B8)
+  return((B7 - B3) / (B7 + B3))
+}
+
+#GNDVI - Green Normalized Difference Vegetation Index
+gndvi <- function(img) {
+  B2 <- img[[2]]  # Green (original B3)
+  B7 <- img[[7]]  # NIR (original B8)
+  return((B7 - B2) / (B7 + B2))
+}
+
+#EVI - Enhanced Vegetation Index
+evi <- function(img) {
+  B1 <- img[[1]]  # Blue (original B2)
+  B3 <- img[[3]]  # Red (original B4)
+  B7 <- img[[7]]  # NIR (original B8)
+  return(2.5 * (B7 - B3) / (B7 + 6 * B3 - 7.5 * B1 + 1))
+}
+
+#NDBI - Normalized Difference Built-up Index
+ndbi <- function(img) {
+  B7 <- img[[7]]  # NIR (original B8)
+  B9 <- img[[9]]  # SWIR1 (original B11)
+  return((B9 - B7) / (B9 + B7))
+}
+
+# Function to predict mixture fractions using the Random Forest model
+predict_mixture_fraction <- function(model, d_frame, sentinel_image) {
+  # Predict the mixture fraction
+  predicted_values <- predict(model, d_frame)
+  # Create a raster to hold the predicted value
+  results <- setValues(raster(sentinel_image), predicted_values)
+  return(results)
+}
