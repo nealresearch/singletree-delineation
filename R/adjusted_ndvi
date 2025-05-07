@@ -1,0 +1,60 @@
+#' The code takes the NDVI image along with the spectral unmix 
+#' and adjust the NDVI according to the formula 
+
+library(raster)
+library(foreach)
+library(doParallel)
+
+source("//home//nilraj.shrestha//R//umixing//R_script//dates.R")
+source("//home//nilraj.shrestha//R//umixing//R_script//get_mean.R")
+ndvi_path <- "//home//nilraj.shrestha//R//umixing//Braunschweig//ndvi//"
+unmix_path <- "//home//nilraj.shrestha//R//umixing//Braunschweig//Braunschweig_unmix//"
+
+
+ndvi_files <- list.files(ndvi_path)
+length(ndvi_files)
+unmix_files <- list.files(unmix_path)
+length(unmix_files)
+
+# It is necesarry that the number of files be equal in both folders
+if (length(ndvi_files) != length(unmix_files)){
+  stop("Check the files. The length does not match")
+}
+divided_months <- list(list(11, 12, 01, 02, 03), list(04, 05, 06, 07), list(08, 09, 10))
+
+
+# loop through each divided months to make sure the ndvi value matches with the season
+for (month_list in seq_len(length(divided_months))){
+  files <- select_file(ndvi_path, divided_months[[month_list]])
+  grass_mean <- mean_val(ndvi_path, files, "g")
+  building_mean <- mean_val(ndvi_path, files, "b")
+  
+  for (file_number in seq_len(length(files))){
+    ndvi <- files[file_number]
+    name <- stringr::str_split(ndvi, pattern = "_")[[1]]
+    date <- name[[2]]
+    unmix_match <- unmix_files[grepl(date, unmix_files)]
+    ndvi_raster <- raster(paste0(ndvi_path, ndvi))
+    unmix_raster <- stack(paste0(unmix_path, unmix_match))
+    
+    
+    # #separate the unmix file to single class
+    grass <- unmix_raster[[1]]
+    building <- unmix_raster[[2]]
+    trees <- unmix_raster[[3]]
+
+    # The variable required for the formula
+    ndvi_observed <- ndvi_raster
+    ndvi_other1 <- building_mean
+    ndvi_other2 <- grass_mean
+
+
+    f_target <- trees
+    f_other1 <- building
+    f_other2 <- grass
+    
+    ndvi_adjusted <- (ndvi_observed - (f_other1 * ndvi_other1) - (f_other2 * ndvi_other2)) / f_target * 0.8
+
+    writeRaster(ndvi_adjusted, paste0("//home//nilraj.shrestha//R//umixing//Braunschweig//ad_2//", name[2]), overwrite=T)
+  }
+}
