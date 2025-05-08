@@ -1,0 +1,67 @@
+library(raster)
+
+# Define the function to get pixel values from a raster at specific coordinates
+getPixelValues <- function(raster, x, y) {
+  # Check if input is a raster stack or brick
+  # if (!is(raster, "RasterStack") && !is(raster, "RasterBrick")) {
+  #   stop("Input must be a RasterStack or RasterBrick")
+  # }
+  # Extract values
+  values <- extract(raster, cbind(x, y))
+  
+  return(values)
+}
+
+ndvi_path <- "//home//nilraj.shrestha//R//umixing//Braunschweig//ndvi//"
+adjusted_path <- "//home//nilraj.shrestha//R//umixing//Braunschweig//ad_2//"
+
+ndvi_files <- list.files(ndvi_path)
+adjusted_files <- list.files(adjusted_path)
+
+
+# x <- 333481.56672713, 
+# y <- 5808112.13059906
+
+x <- 604483.22893221
+y <- 5794074.07867570
+
+r1_l <- list()
+r2_l <- list()
+
+for (idx_file in 1:length(ndvi_files)){
+  r1 <- raster(paste0(ndvi_path, ndvi_files[idx_file]))
+  r1_v <- getPixelValues(r1, x, y)
+  r1_l[idx_file] <- r1_v
+  
+  r2 <- raster(paste0(adjusted_path, adjusted_files[idx_file]))
+  r2_v <- getPixelValues(r2, x, y)
+  r2_l[idx_file] <- r2_v
+}
+
+# Your previous code here (loading r1_l and r2_l)
+
+# Combine lists and clean
+ndvi_values <- unlist(r1_l)
+adjusted_ndvi_values <- unlist(r2_l)
+
+# Remove values less than -1
+ndvi_values[ndvi_values < -1] <- NA
+adjusted_ndvi_values[adjusted_ndvi_values < -1] <- NA
+adjusted_ndvi_values[adjusted_ndvi_values > 1] <- NA
+
+
+# Create time axis
+start_date <- as.Date("2018-01-01")
+end_date <- as.Date("2024-12-31")
+time_points <- seq(start_date, end_date, length.out = length(ndvi_values))
+
+# Plot
+plot(time_points, ndvi_values, type = "o", col = "green", pch = 16,
+     ylim = range(c(ndvi_values, adjusted_ndvi_values), na.rm = TRUE),
+     xlab = "Time", ylab = "NDVI", main = "NDVI vs Adjusted NDVI",
+     xaxt = "n") # Don't plot x-axis yet
+
+lines(time_points, adjusted_ndvi_values, type = "o", col = "blue", pch = 17)
+
+# Add custom x-axis with 6 months gap
+axis.Date(1, at = seq(start_date, end_date, by = "6 months"), format = "%Y-%m")
