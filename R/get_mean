@@ -1,0 +1,30 @@
+library(sf)
+library(terra)
+library(raster)
+
+mean_val <- function(p, image, endmember){
+  
+  path <- "//home//nilraj.shrestha//R//umixing//Braunschweig//shapefile//"
+  
+  building_shp <- read_sf(paste0(path, "building.shp"))
+  grass_shp <- read_sf(paste0(path, "grass.shp"))
+  tree_shp <- read_sf(paste0(path,"trees.shp"))
+  
+  xx <- function(img, shp){
+    coords <- st_coordinates(shp$geometry)
+    val <- terra::extract(img, coords)
+    mean_val <- mean(val, na.rm=TRUE)
+    return (mean_val)
+  }
+  ras <- raster(paste0(p, image))
+  g <- xx(ras, grass_shp)
+  b <- xx(ras, building_shp)
+  t <- xx(ras, tree_shp)
+  if (endmember == "b"){
+      return(b)
+    }else if(endmember == "g"){
+      return(g)
+    } else if (endmember == "t"){
+      return(t)
+    }
+}
