@@ -1,0 +1,41 @@
+library(sf)
+library(terra)
+library(furrr)
+library(stringr)
+library(dplyr)
+
+# Set number of workers
+plan(multisession, workers = 30)
+
+# Path to NDVI rasters
+ndvi_dir <- "//home//nilraj.shrestha//R//umixing//havel//havel_ndvi//"
+ndvi_files <- list.files(ndvi_dir, pattern = "\\.tif$", full.names = TRUE)
+
+# Load your polygon shapefile
+polygons_sf <- st_read("//home//nilraj.shrestha//R//lasdata//test//area_poster.shp")
+
+# Function to process a single NDVI file
+process_ndvi <- function(ndvi_path) {
+  # Extract date from filename
+  date_str <- str_extract(basename(ndvi_path), "\\d{4}-\\d{2}-\\d{2}")
+  column_name <- paste0("ndvi_", date_str)
+  
+  # Read NDVI raster
+  ndvi_rast <- rast(ndvi_path)
+  
+  # Extract NDVI for polygons (mean if overlaps)
+  extracted_vals <- terra::extract(ndvi_rast, vect(polygons_sf), fun = mean, na.rm = TRUE)
+  
+  # Combine results into new column
+  polygons_sf[[column_name]] <- extracted_vals[[2]]  # First column is ID
+  return(polygons_sf[, column_name])
+}
+
+# Parallel apply to all NDVI rasters
+ndvi_results <- future_map(ndvi_files, process_ndvi)
+
+# Bind all new NDVI columns to original polygons
+polygons_final <- bind_cols(polygons_sf, do.call(cbind, ndvi_results))
+
+# Save result
+st_write(polygons_final, "//home//nilraj.shrestha//R//lasdata//test//output_with_ndvi.gpkg")
