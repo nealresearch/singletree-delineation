@@ -1,0 +1,56 @@
+library(raster)
+library(foreach)
+library(doParallel)
+library(stringr)
+
+source("//home//nilraj.shrestha//R//umixing//R_script//dates.R")
+source("//home//nilraj.shrestha//R//umixing//R_script//get_mean.R")
+
+rast_path <- "//home//nilraj.shrestha//R//umixing//Braunschweig//Braunschweig_interpolation//"
+unmix_path <- "//home//nilraj.shrestha//R//umixing//Braunschweig//Braunschweig_unmix//"
+output_path <- "//home//nilraj.shrestha//R//umixing//Braunschweig//corrected_sen2//"
+
+rast_files <- list.files(rast_path)
+unmix_files <- list.files(unmix_path)
+
+if (length(rast_files) != length(unmix_files)) {
+  stop("Check the files. The length does not match")
+}
+
+# Setup parallel backend
+num_cores <- 30
+cl <- makeCluster(num_cores)
+registerDoParallel(cl)
+
+# Run in parallel
+foreach(file = seq_along(rast_files), .packages = c("raster", "stringr", "sf")) %dopar% {
+  name <- str_split(rast_files[file], pattern = "_")[[1]]
+  d <- str_split(name[[2]], pattern = "Z")
+  date <- d[[1]][1]
+  unmix_match <- unmix_files[grepl(date, unmix_files)]
+  
+  img_raster <- stack(file.path(rast_path, rast_files[file]))
+  
+  grass_endmember <- mean_val(img_raster, "g")
+  building_endmember <- mean_val(img_raster, "b")
+  tree_endmember <- mean_val(img_raster, "t")
+  
+  unmix_raster <- stack(file.path(unmix_path, unmix_match))
+  
+  grass <- unmix_raster[[1]]
+  building <- unmix_raster[[2]]
+  trees <- unmix_raster[[3]]
+  
+  final_name <- paste0(date, ".tif")
+  
+  corrected_image <- tree_endmember * trees
+  
+  writeRaster(
+    corrected_image,
+    filename = file.path(output_path, final_name),
+    overwrite = TRUE
+  )
+}
+
+# Stop cluster
+stopCluster(cl)
