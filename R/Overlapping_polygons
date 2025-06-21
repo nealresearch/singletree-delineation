@@ -1,0 +1,189 @@
+# ── Libraries ──────────────────────────────────────────────────────────────
+library(lidR)
+library(raster)
+library(sf)
+library(dplyr)
+setwd("//home//nilraj.shrestha//R//lasdata//havel//overlap//one_tile//")
+# ── 0.  Tile paths ─────────────────────────────────────────────────────────
+path <- "//home//nilraj.shrestha//R//lasdata//havel//slope_result//result"
+cat_path <- "//home//nilraj.shrestha//R//lasdata//havel//overlap//one_tile//"
+
+ctg <- catalog(cat_path)           # not laz_file !
+opt_select(ctg) <- "xyz"
+
+laz_files <- list.files(path, "\\.laz$", full.names = TRUE)
+if (length(laz_files) == 0) stop("No LAZ in working dir.")
+
+laz_file  <- laz_files[4]           # one tile
+base_name <- sub("\\.laz$", "", basename(laz_file))
+tif_file  <- file.path(path, paste0(base_name, "_processed.tif"))
+if (!file.exists(tif_file))
+  stop("No *_processed.tif for tile")
+
+# ── 1.  LAS objects ────────────────────────────────────────────────────────
+# 2. Core LAS (no buffer) – still just one file
+las_tile <- readLAS(laz_file) |> filter_poi(Z > 3)
+
+# 3. Buffered LAS – now pulls neighbour points too
+buf <- 30
+hdr <- las_tile@header
+buf_ext <- raster::extent(
+  hdr$`Min X` - buf, hdr$`Max X` + buf,
+  hdr$`Min Y` - buf, hdr$`Max Y` + buf
+)
+
+las_buf <- clip_roi(ctg, buf_ext, inside = TRUE) |> filter_poi(Z > 3)
+# (You won’t touch las_buf again until the watershed step.)
+
+# ── 2.  Load the existing radius raster (whole tile, no crop) ──────────────
+r <- terra::rast(tif_file)              # keep full raster; matches old grid
+
+# ── 3.  CHM on the **tile grid** (no buffer) ──────────────────────────────
+chm_raw <- rasterize_canopy(
+  las_tile, res = 0.5,
+  algorithm = p2r(0.6), na.fill = kriging()
+)
+chm <- terra::resample(chm_raw, r, method = "bilinear")   # ← one-liner
+
+# ── Build a buffered CHM for mcws() ────────────────────────────────────────
+# las_buf already holds the tile + 30-m collar
+chm_buf <- rasterize_canopy(
+  las_buf,
+  res       = 0.5,          # keep same resolution
+  algorithm = p2r(0.6),
+  na.fill   = kriging()
+)
+plot(chm_buf)
+# OPTIONAL: make sure its grid origin matches the marker grid
+# chm_buf <- terra::resample(chm_buf, r, method = "bilinear")
+
+# (Optional: drop the unaligned copy to free RAM)
+rm(chm_raw); gc()
+# ── 4.  Pixel table from raster ────────────────────────────────────────────
+r <- raster::raster(r)                       # convert once
+spts <- rasterToPoints(r, spatial = TRUE)
+df_raster <- data.frame(spts@coords, ws = spts@data[, 1]) |>
+  filter(ws > 2) |>
+  mutate(ws = ifelse(ws <= 2, ceiling(ws), floor(ws)))
+
+# ── 5.  locate_trees only for radii that actually occur ───────────────────
+ws_vals <- sort(unique(df_raster$ws))
+datalist <- lapply(ws_vals, function(w) {
+  tt <- locate_trees(chm, lmf(w, shape = "circular"))
+  if (!is.null(tt) && nrow(tt) > 0) { tt$ws <- w; tt } else NULL
+})
+datalist <- Filter(Negate(is.null), datalist)
+
+# ── 6.  Convert treetops to data-frame (grid already identical) ───────────
+tt_combined <- bind_rows(datalist)
+coords_mat  <- st_coordinates(tt_combined$geometry)
+
+df_ttops <- data.frame(
+  x  = coords_mat[, 1],
+  y  = coords_mat[, 2],
+  z  = coords_mat[, 3],
+  ws = tt_combined$ws
+)
+print(df_ttops)
+# ── 7.  Merge exactly as in your original script ──────────────────────────
+total <- merge(df_raster, df_ttops, by = c("x", "y", "ws"))
+cat("Rows in merged table:", nrow(total), "\n")
+
+
+
+df_filtered <- data.frame(total)
+vector <- c(1:length(total$x))
+df_filtered$treeID <- vector
+
+#df_filtered <- df_filtered[df_filtered$ws > 1, ]
+coordinates(df_filtered) <- ~x + y
+
+# ttops_2d <- st_zm(ttops, z = NULL, m = NULL)  # Convert 3D points to 2D
+# Save treetops as a point shapefile
+treetops_sf <- sf::st_as_sf(df_filtered)
+
+pts <- treetops_sf[treetops_sf$ws >= 1,]
+# Initialize a named logical vector to keep track of removed points
+removed_points <- rep(FALSE, nrow(pts))
+names(removed_points) <- rownames(pts)
+
+# Create buffers for all points
+buffers <- st_buffer(pts, dist = pts$ws)
+
+# st_write(buffers, "M:\\lidar\\tif\\1\\buffer.shp")
+
+# Calculate which points are within other points' buffers
+within <- st_within(pts, buffers, sparse = FALSE)
+
+# Now process the 'within' relationships to determine which points to remove
+for (i in 1:nrow(pts)) {
+  # Only process if the point hasn't been removed already
+  if (!removed_points[names(removed_points)[i]]) {
+    # find all the points inside the buffer
+    within_indices <- which(within[i, ])
+    # Exclude the point itself
+    within_indices <- within_indices[within_indices != i]
+    for (j in within_indices) {
+      # Proceed if the target point hasn't been removed
+      if (!removed_points[names(removed_points)[j]]) {
+        # Compare buffer sizes and mark the point with the smaller buffer for removal
+        if (pts$ws[i] < pts$ws[j]) {
+          removed_points[names(removed_points)[i]] <- TRUE
+          break # Current point will be removed, no need to check further
+        } else if (pts$ws[i] == pts$ws[j] && i < j) {
+          # If buffer sizes are equal, remove the point with the higher index
+          removed_points[names(removed_points)[j]] <- TRUE
+        } else {
+          removed_points[names(removed_points)[j]] <- TRUE
+        }
+      }
+    }
+  }
+}
+# Filter out points marked for removal
+pts <- pts[!removed_points, ]
+# Create new buffers based on remaining points
+point_buff <- st_buffer(pts, pts$ws)
+
+ttops_df <- st_set_geometry(pts, NULL)
+ttops_coords <- st_coordinates(pts)[, 1:2]# assuming columns 1 and 2 are your X and Y coordinates
+ttops_sp <- SpatialPointsDataFrame(ttops_coords, ttops_df)
+data_frame_ttops <- data.frame(ttops_sp)
+
+sp::proj4string(ttops_sp) <- sp::CRS(projection(chm)) 
+ttops_sp$treeID <- seq_len(nrow(ttops_sp))
+
+# ── run watershed on the buffered CHM ──────────────────────────────────────
+proj4string(ttops_sp) <- raster::crs(chm_buf)     # ensure identical CRS
+ttops_sp$treeID       <- seq_len(nrow(ttops_sp))  # IDs must be ≥1
+
+proj4string(ttops_sp) <- raster::crs(chm_buf)
+
+
+mcws_segments_grid <- (ForestTools::mcws(ttops_sp, chm_buf, format = "polygon", minHeight = 3))
+plot(mcws_segments_grid)
+
+# # Build an sf bounding box from the LAS header
+# core_bbox <- sf::st_bbox(
+#   c(xmin = hdr$`Min X`, ymin = hdr$`Min Y`,
+#     xmax = hdr$`Max X`, ymax = hdr$`Max Y`),
+#   crs = sf::st_crs(chm_buf)          # same CRS as crowns
+# )
+
+crowns_core <- sf::st_as_sf(mcws_segments_grid)
+# ── 1.  Add crown_area to the CORE polygons ───────────────────────────────
+crowns_vect   <- terra::vect(crowns_core)                 # sf → SpatVector
+crowns_core$crown_area <- terra::expanse(crowns_vect, unit = "m")
+
+# option B – with st_crs() assignment
+sf::st_crs(crowns_core) <- sf::st_crs(25833)        # 25833 in your script
+
+st_write(
+  crowns_core,
+  dsn    = "result_seg",
+  layer  = base_name,
+  driver = "ESRI Shapefile",
+  append = FALSE,                       # overwrite=T for sf ≥1.0
+  delete_dsn = TRUE                     # removes old file set first
+)
+
