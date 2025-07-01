@@ -1,0 +1,94 @@
+library(sf)
+library(terra)
+library(dplyr)
+
+compute_seasonal_band_means <- function(shapefile_path) {
+  image_dir <- "//home//nilraj.shrestha//R//umixing//Braunschweig//Braunschweig_interpolation//"
+  
+  # Load shapefile coords
+  coords <- sf::st_read(shapefile_path, quiet = TRUE) |>
+    sf::st_coordinates() |>
+    as.data.frame() |>
+    dplyr::select(X, Y)
+  
+  # Define the missing function
+  extract_band_means <- function(img_path, coords) {
+    r <- rast(img_path)               # load image
+    vals <- terra::extract(r, coords)       # extract pixel values at coords
+    colMeans(vals, na.rm = TRUE)  # remove ID column and take mean across points per band
+  }
+  
+  classify_images <- function(files, image_dir, month_groups) {
+    grouped <- list()
+    for (file in files) {
+      parts <- strsplit(file, "_")
+      parts <- parts[[1]][2]
+
+      
+      date_str <- strsplit(parts, "Z")
+      date_str <- date_str[[1]][1]
+      
+      date_parts <- strsplit(date_str, "-")[[1]]
+      
+      year <- as.character(as.integer(date_parts[1]))
+      month <- as.integer(date_parts[2])
+
+      group <- as.character(which(sapply(month_groups, function(g) month %in% g)))
+      if (length(group) == 0) {
+        message("Month ", month, " from year ", year, " not in any group! File: ", file)
+        next
+      }
+      
+      # Initialize year if missing
+      if (is.null(grouped[[year]])) {
+        grouped[[year]] <- list()
+      }
+
+      # Initialize group if missing
+      if (is.null(grouped[[year]][[group]])) {
+        grouped[[year]][[group]] <- character()
+      }
+      
+      # Append file path
+      grouped[[year]][[group]] <- c(
+        grouped[[year]][[group]],
+        file.path(image_dir, file)
+      )
+    }
+    grouped
+  }
+  # Compute seasonal band means for each group
+  compute_means_by_group <- function(grouped_images) {
+    summary <- list()
+    for (year in names(grouped_images)) {
+      
+      summary[[year]] <- list()
+      for (group in names(grouped_images[[year]])) {
+        image_list <- grouped_images[[year]][[group]]
+        image_means <- lapply(image_list, function(img_path) {
+
+          extract_band_means(img_path, coords)
+        })
+        
+        image_means_matrix <- do.call(rbind, image_means)
+        group_mean <- colMeans(image_means_matrix, na.rm = TRUE)
+        
+        summary[[year]][[group]] <- group_mean
+      }
+    }
+    summary
+  }
+  # Main pipeline
+  month_groups <- list(
+    "1" = c(1, 2, 3, 4),
+    "2" = c(5),
+    "3" = c(6, 7),
+    "4" = c(8, 9),
+    "5" = c(10, 11, 12)
+  )
+  files <- list.files(image_dir, pattern = "\\.tif$", full.names = FALSE)
+
+  grouped <- classify_images(files, image_dir, month_groups)
+  seasonal_means <- compute_means_by_group(grouped)
+  return(seasonal_means)
+}
