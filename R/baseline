@@ -1,0 +1,133 @@
+library(raster)
+library(foreach)
+library(doParallel)
+library(stringr)
+options(digits = 8)
+
+# your sources…
+source("//home//nilraj.shrestha//R//umixing//R_script//havel_mean_baseline.R")
+source("//home//nilraj.shrestha//R//umixing//R_script//automated_endmember_correction_havel.R")
+source("//home//nilraj.shrestha//R//umixing//R_script//automated_evi.R")
+
+# …and your filepaths + lists
+tree_shapefile <- "//home//nilraj.shrestha//R//umixing//Braunschweig//shapefile//trees.shp"
+grass_shapefile <- "//home//nilraj.shrestha//R//umixing//Braunschweig//shapefile//grass.shp"
+building_shapefile <- "//home//nilraj.shrestha//R//umixing//Braunschweig//shapefile//building.shp"
+
+rast_path  <- "//home//nilraj.shrestha//R//umixing//havel//havel_interpolation_mask//"
+unmix_path <- "//home//nilraj.shrestha//R//umixing//havel//havel_unmix_mask//"
+
+image_list <- list.files(rast_path)
+cat("Found", length(image_list), "images in", rast_path, "\n")
+unmix_list <- list.files(unmix_path)
+cat("Found", length(unmix_list), "images in", rast_path, "\n")
+# coord → df
+df_coord <- function(shp) {
+  sf::st_read(shp, quiet=TRUE) |>
+    sf::st_coordinates() |>
+    as.data.frame() |>
+    dplyr::select(X, Y)
+}
+tree_E_df     <- df_coord(tree_shapefile)
+grass_E_df    <- df_coord(grass_shapefile)
+building_E_df <- df_coord(building_shapefile)
+length_df     <- nrow(tree_E_df)
+
+# register cores (no makeCluster needed)
+doParallel::registerDoParallel(cores = 30)
+
+results <- list()
+for (i in 1:50) {
+
+  # pick random coords + compute means
+  rv             <- sort(as.integer(runif(2, 1, 54)))
+  print(rv)
+  tree_sub       <- tree_E_df[rv[1]:rv[2], ]
+  grass_sub      <- grass_E_df[rv[1]:rv[2], ]
+  building_sub   <- building_E_df[rv[1]:rv[2], ]
+  get_mean_tree     <- compute_seasonal_band_means(tree_sub)
+  get_mean_grass    <- compute_seasonal_band_means(grass_sub)
+  get_mean_building <- compute_seasonal_band_means(building_sub)
+  tree_val     <- get_mean_tree
+  grass_val    <- get_mean_grass
+  building_val <- get_mean_building
+  
+  # 2) for each image, compute EVI and cbind its val-column
+  main_df <- NULL
+  # 2) parallel inner loop: one full EVI df per image
+  evi_list <- foreach(
+    j = seq_along(image_list),
+    .packages    = "raster",
+    .export      = c(
+      "rast_path","unmix_path",
+      "image_list","unmix_list",
+      "tree_val","grass_val","building_val",
+      "endmember_correction","EVI"
+    ),
+    .combine     = "c",      # flatten into one long list
+    .inorder     = TRUE,
+    .errorhandling = "stop"
+  ) %dopar% {
+    img      <- image_list[j]
+    unmixImg <- unmix_list[j]
+    ec       <- endmember_correction(
+      rast_path, img,
+      unmix_path, unmixImg,
+      grass_val, building_val, tree_val
+    )
+    evi <- EVI(ec)
+
+    df  <- na.omit(as.data.frame(evi, xy = TRUE))
+    name <- paste0("val_", tools::file_path_sans_ext(image_list[j]))
+    names(df)[3] <- name
+    list(df)   # return a single‐element list so 'c' will append it
+  }
+  
+  # bind x,y + each val_<imagename>
+  
+  main_df <- evi_list[[1]]
+  for (k in 2:length(evi_list)) {
+    main_df <- cbind(main_df, evi_list[[k]][[3]])
+    names(main_df)[ncol(main_df)] <- names(evi_list[[k]])[3]
+  }
+  results[[i]] <- main_df
+}
+stopImplicitCluster()
+results
+
+extract_series <- function(df, x0, y0) {
+  row <- df[ df$x==x0 & df$y==y0, ]
+  if(nrow(row)==0) stop("no data at that point")
+  vals <- as.numeric(row[ , -(1:2)])
+  dates <- as.Date(sub(".*_(.*)Z$", "\\1", names(row)[-(1:2)]))
+  data.frame(date=dates, value=vals)
+}
+
+# 2) extract one series per replicate
+x0 <- 331025
+y0 <- 5812005 
+
+series_list <- lapply(results, extract_series, x0=x0, y0=y0)
+
+# 3) assemble a matrix of values (rows=dates, cols=reps)
+vals_mat <- sapply(series_list, `[[`, "value")
+dates   <- series_list[[1]]$date
+
+# 4) compute mean and sd
+mean_vals <- rowMeans(vals_mat, na.rm=TRUE)
+sd_vals   <- apply(vals_mat, 1, sd,      na.rm=TRUE)
+
+# 5) build your summary df
+summary_df <- data.frame(
+  date  = dates,
+  mean  = mean_vals,
+  upper = mean_vals + sd_vals,
+  lower = mean_vals - sd_vals
+)
+
+# now you can plot:
+plot(summary_df$date, summary_df$mean, type="l")
+lines(summary_df$date, summary_df$upper, lty=2)
+lines(summary_df$date, summary_df$lower, lty=2)
+
+
