@@ -1,0 +1,74 @@
+library(sf)
+library(terra)
+library(dplyr)
+source("//home//nilraj.shrestha//R//umixing//R_script//get_group.R")
+#step1: call group -> gives the list of images in groups
+#step2: extract the image_list from the group_list
+#step3: use the image_list to get values, 
+#step4: calculate the mean from step3
+get_endmember_val <- function(shapefile_path, date, grp, random_value){
+  # # Load shapefile coords
+  coords <- sf::st_read(shapefile_path, quiet = TRUE) |>
+    sf::st_coordinates() |>
+    as.data.frame() |>
+    dplyr::select(X, Y)
+  
+  # Define the missing function
+  extract_band_values<- function(img_path, coords) {tree
+    r <- rast(img_path)               # load image
+    vals <- terra::extract(r, coords)       # extract pixel values at coords
+    return (vals)  # remove ID column and take mean across points per band
+  }
+
+  find_key_by_value <- function(value, list_obj) {
+    for (key in names(list_obj)) {
+      if (value %in% list_obj[[key]]) {
+        return(key)
+      }
+    }
+    return(NA)  # if not found
+  }
+  image_list <- function(date, grp) {
+    date_ <- strsplit(date, "-")
+    year <- date_[[1]][1]
+    month <- date_[[1]][2]
+    key <- find_key_by_value(as.numeric(month), month_groups)
+    image_list <- grp[[year]][key]
+    return (image_list)
+  }
+  
+  extract_values <- function(img_list, coord) {
+    mean_list <- list()  # Use a list first to avoid slow rbind
+    for (i in seq_along(img_list)) {
+      value <- extract_band_means(img_list[[i]], coord)
+      mean_list[[i]] <- value
+    }
+    final_df <- do.call(rbind, mean_list)
+    return(final_df)
+  }
+  
+  get_mean <- function(arr){
+    # Step 1: Convert matrix to data frame
+    df <- as.data.frame(arr)
+    # Step 2: Remove ID column if present
+    df_no_id <- df[, -1]
+    # Step 3: Extract band numbers from column names
+    band_nums <- sub(".*Z_(\\d+)$", "\\1", colnames(df_no_id))
+    # Step 4: Group columns by band number
+    cols_by_band <- split(colnames(df_no_id), band_nums)
+    # Step 5: Compute mean for each band across all dates
+    band_means <- sapply(cols_by_band, function(cols) {
+      print(mean(as.numeric(unlist(df_no_id[, cols]))))
+      mean(as.numeric(unlist(df_no_id[, cols])), na.rm = TRUE)
+    })
+    # Step 6: Convert to data frame for nice output
+    band_means_df <- data.frame(Band =c("1","2","3","4","5","6","7","8","9","10"), Mean = band_means)
+    return (band_means_df)
+  }
+  # Start calling the function here
+  xy <- coords[random_value, ]
+  img_l <- image_list(date, grp)
+  values <- extract_values(img_l, xy)
+  mean <- get_mean(values)
+  return (mean)
+}
