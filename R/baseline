@@ -1,117 +1,249 @@
+library(dplyr)
+library(purrr)
 library(raster)
+library(future)
+library(tibble)
+library(phenofit)
+library(stringr)
 library(foreach)
 library(doParallel)
-library(stringr)
+library(future.apply)
+plan(multisession, workers= 40)
 options(digits = 8)
 
-# your sources…
-source("//home//nilraj.shrestha//R//umixing//R_script//havel_mean_baseline.R")
+#####################################DATA SOURCE############################################################
+source("//home//nilraj.shrestha//R//umixing//R_script//get_group.R")
+source("//home//nilraj.shrestha//R//umixing//R_script//get_endmember.R")
 source("//home//nilraj.shrestha//R//umixing//R_script//automated_endmember_correction_havel.R")
+source("//home//nilraj.shrestha//R//umixing//R_script//get_sentinel_evi_values.R")
 source("//home//nilraj.shrestha//R//umixing//R_script//automated_evi.R")
+source("//home//nilraj.shrestha//R//umixing//R_script//weighted_polygon.R")
+source("//home//nilraj.shrestha//R//umixing//R_script//get_sentinel_polygon.R")
+sen_val <- sentinel_df()
 
 # …and your filepaths + lists
 tree_shapefile <- "//home//nilraj.shrestha//R//umixing//Braunschweig//shapefile//trees.shp"
 grass_shapefile <- "//home//nilraj.shrestha//R//umixing//Braunschweig//shapefile//grass.shp"
 building_shapefile <- "//home//nilraj.shrestha//R//umixing//Braunschweig//shapefile//building.shp"
 
-rast_path  <- "//home//nilraj.shrestha//R//umixing//havel//havel_interpolation_mask//"
-unmix_path <- "//home//nilraj.shrestha//R//umixing//havel//havel_unmix_mask//"
+rast_path  <- "//home//nilraj.shrestha//R//umixing//havel//tiles//interpolation//"
+unmix_path <- "//home//nilraj.shrestha//R//umixing//havel//tiles//unmix//"
+# sentinel_path <- "//home//nilraj.shrestha//R//umixing//havel//havel_sen_evi_smooth//"
+# sentinel_path_unsmoothed <- "//home//nilraj.shrestha//R//umixing//havel//masked_sen_evi//"
+###########################################################################################################
+
+########################################FUNCTION############################################################
+random_number <- function(x, start_numb, end_numb){
+  number <- floor(runif(x, min=start_numb, max=end_numb))
+  return (number)
+}
+smooth_pixel <- function(ts){
+  q <- quantile(ts, probs=c(0.05, 0.95), na.rm=TRUE)
+  w <- ifelse(ts < q[1] | ts > q[2], 0.1, 1)
+  opt <- phenofit::lambda_vcurve(ts, w = w, lg_lambdas = seq(0.1, 1, 0.1))
+  lambda <- opt$lambda
+  pracma::whittaker(ts, lambda = lambda, d=3)
+}
+
+# Define smoothing function for a full data frame
+smooth_one_df <- function(df) {
+  df2 <- df[, !(names(df) %in% c("polygon_id"))]
+  df_xy <- df[, c("polygon_id")]
+  band_names <- names(df2)
+  
+  result_df <- df2 |>
+    asplit(1) |>
+    map_dfr(\(ts) {
+      out <- smooth_pixel(ts)
+      print(out)
+      names(out) <- band_names
+      as_tibble_row(out)
+    })
+  
+  bind_cols(df_xy, result_df)
+}
+
+extract_series <- function(df, x0) {
+  row <- df[ df$polygon_id==x0, ]
+  if(nrow(row)==0) stop("no data at that point")
+  vals <- as.numeric(row[ , -(1)])
+  dates <- as.Date(sub(".*_(\\d{4}-\\d{2}-\\d{2})Z$", "\\1", names(row)[-(1)]))
+  data.frame(date=dates, value=vals)
+}
+
+extract_summer_series <- function(df, x) {
+  # 1) grab the row
+  row <- df[df$polygon_id == x, , drop = FALSE]
+  if (nrow(row) == 0) stop("no data at that point")
+  
+  # 2) find just the value-columns
+  val_cols <- grep("^val_interpolated_openEO_", names(row), value = TRUE)
+  
+  # 3) parse their dates
+  dates <- as.Date(
+    gsub("^val_interpolated_openEO_(.*)Z$", "\\1", val_cols),
+    format = "%Y-%m-%d"
+  )
+  # 4) pull the numeric values
+  vals <- as.numeric(row[1, val_cols])
+  # 5) keep only May–August
+  months <- as.integer(format(dates, "%m"))
+  keep   <- months >= 1 & months <= 12
+  
+  # 6) return filtered series
+  data.frame(
+    date  = dates[keep],
+    value = vals[keep]
+  )
+}
+
+# --- Function to check if filename is in summer months (June–Sept) ---
+is_summer_file <- function(filename) {
+  # Remove "Z.tif" and convert to Date
+  date_str <- sub("Z\\.tif$", "", filename)
+  date <- as.Date(date_str, format = "%Y-%m-%d")
+  month_num <- as.numeric(format(date, "%m"))
+  return(month_num %in% 6:8)
+}
+
+#######################################################################################
 
 image_list <- list.files(rast_path)
+
 cat("Found", length(image_list), "images in", rast_path, "\n")
 unmix_list <- list.files(unmix_path)
 cat("Found", length(unmix_list), "images in", rast_path, "\n")
-# coord → df
-df_coord <- function(shp) {
-  sf::st_read(shp, quiet=TRUE) |>
-    sf::st_coordinates() |>
-    as.data.frame() |>
-    dplyr::select(X, Y)
-}
-tree_E_df     <- df_coord(tree_shapefile)
-grass_E_df    <- df_coord(grass_shapefile)
-building_E_df <- df_coord(building_shapefile)
-length_df     <- nrow(tree_E_df)
 
-# register cores (no makeCluster needed)
+group <- get_group()
 doParallel::registerDoParallel(cores = 30)
 
+month_groups <- list(
+  "1" = c(1, 2, 3, 4),
+  "2" = c(5),
+  "3" = c(6, 7),
+  "4" = c(8, 9),
+  "5" = c(10, 11, 12))
 results <- list()
-for (i in 1:50) {
-
+for (i in 1:20) {
   # pick random coords + compute means
-  rv             <- sort(as.integer(runif(2, 1, 54)))
-  print(rv)
-  tree_sub       <- tree_E_df[rv[1]:rv[2], ]
-  grass_sub      <- grass_E_df[rv[1]:rv[2], ]
-  building_sub   <- building_E_df[rv[1]:rv[2], ]
-  get_mean_tree     <- compute_seasonal_band_means(tree_sub)
-  get_mean_grass    <- compute_seasonal_band_means(grass_sub)
-  get_mean_building <- compute_seasonal_band_means(building_sub)
-  tree_val     <- get_mean_tree
-  grass_val    <- get_mean_grass
-  building_val <- get_mean_building
-  
+  randn <- random_number(3, 1, 50)
+  grass_rn <- randn[1]
+  building_rn <- randn[2]
+  trees_rn <- randn[3]
   # 2) for each image, compute EVI and cbind its val-column
   main_df <- NULL
   # 2) parallel inner loop: one full EVI df per image
-  evi_list <- foreach(
-    j = seq_along(image_list),
-    .packages    = "raster",
-    .export      = c(
-      "rast_path","unmix_path",
-      "image_list","unmix_list",
-      "tree_val","grass_val","building_val",
-      "endmember_correction","EVI"
-    ),
-    .combine     = "c",      # flatten into one long list
-    .inorder     = TRUE,
-    .errorhandling = "stop"
-  ) %dopar% {
-    img      <- image_list[j]
-    unmixImg <- unmix_list[j]
-    ec       <- endmember_correction(
-      rast_path, img,
-      unmix_path, unmixImg,
-      grass_val, building_val, tree_val
-    )
-    evi <- EVI(ec)
-
-    df  <- na.omit(as.data.frame(evi, xy = TRUE))
-    name <- paste0("val_", tools::file_path_sans_ext(image_list[j]))
-    names(df)[3] <- name
-    list(df)   # return a single‐element list so 'c' will append it
-  }
-  
-  # bind x,y + each val_<imagename>
-  
-  main_df <- evi_list[[1]]
-  for (k in 2:length(evi_list)) {
-    main_df <- cbind(main_df, evi_list[[k]][[3]])
-    names(main_df)[ncol(main_df)] <- names(evi_list[[k]])[3]
+  evi_chunks <- foreach(j = seq_along(image_list),
+                        .packages = c("raster", "sf", "tibble", "stringr", "purrr", "dplyr"),
+                        .export      = c(
+                          "rast_path","unmix_path",
+                          "image_list","unmix_list","group","month_groups",
+                          "grass_rn", "building_rn", "trees_rn",
+                          "endmember_correction","EVI"
+                        ),
+                        .combine = "c") %dopar% {
+                          img      <- image_list[j]
+                          unmixImg <- unmix_list[j]
+                          initial_name <- img
+                          split_name <- str_split(initial_name,"_")
+                          date <- split_name[[1]][3]
+                          year <- strsplit(date, "-")[[1]][1]
+                          
+                          tree_val <- get_endmember_val(tree_shapefile, date, group, trees_rn, month_groups)
+                          
+                          if("Band" %in% colnames(tree_val))
+                          {
+                            tree_val <- tree_val
+                          }else {
+                            modified_date <- sub(paste0("^", year), "2018", date)
+                            tree_val <- get_endmember_val(tree_shapefile, modified_date, group, trees_rn,month_groups)
+                          }
+                          grass_val<- get_endmember_val(grass_shapefile, date, group, grass_rn, month_groups)
+                          # Check if it's FALSE
+                          if("Band" %in% colnames(grass_val)){
+                            grass_val <- grass_val
+                          }else {
+                            # Replace 2019 with 2018
+                            modi_date <- sub(paste0("^", year), "2018", date)
+                            grass_val <- get_endmember_val(grass_shapefile, modi_date, group, grass_rn, month_groups)
+                          }
+                          building_val <- get_endmember_val(building_shapefile, date, group, building_rn, month_groups)
+                          # Check if it's FALSE
+                          if ("Band" %in% colnames(building_val)){
+                            building_val <- building_val
+                          }else {
+                            # Replace 2019 with 2018
+                            mod_date <- sub(paste0("^", year), "2018", date)
+                            building_val <- get_endmember_val(building_shapefile, mod_date, group, building_rn, month_groups)
+                          }
+                          ec  <- endmember_correction(rast_path, img, unmix_path, unmixImg, grass_val, building_val, tree_val)
+                          evi <- EVI(ec)
+                          weighted_polygon <- compute_weighted_evi_unmix(evi, unmixImg)
+                          df  <- na.omit(as.data.frame(weighted_polygon, xy = TRUE))
+                          name <- paste0("val_", tools::file_path_sans_ext(image_list[j]))
+                          names(df)[2] <- name
+                          list(df)   # return a single‐element list so 'c' will append it
+                          
+                        }
+  main_df <- evi_chunks[[1]][, 1:2]
+  # Add other images' value columns
+  for (k in 2:length(evi_chunks)) {
+    val_col <- evi_chunks[[k]][, 2, drop = FALSE]
+    colname <- names(val_col)
+    main_df <- cbind(main_df, val_col)
+    names(main_df)[ncol(main_df)] <- colname
   }
   results[[i]] <- main_df
 }
 stopImplicitCluster()
-results
-
-extract_series <- function(df, x0, y0) {
-  row <- df[ df$x==x0 & df$y==y0, ]
-  if(nrow(row)==0) stop("no data at that point")
-  vals <- as.numeric(row[ , -(1:2)])
-  dates <- as.Date(sub(".*_(.*)Z$", "\\1", names(row)[-(1:2)]))
-  data.frame(date=dates, value=vals)
+# Apply smoothing to all data frames in parallel
+smoothed_results <- future_lapply(results, smooth_one_df)
+smoothed_results
+for (k in seq_along(smoothed_results)){
+  smoothed_results[[k]] <- smoothed_results[[k]] |>
+    rename(polygon_id = 1)
 }
 
-# 2) extract one series per replicate
-x0 <- 331025
-y0 <- 5812005 
+##################################### SMOOTHED DATA EXTRACTIONS#######################################################
 
-series_list <- lapply(results, extract_series, x0=x0, y0=y0)
+# # 2) extract one series per replicate
+# x <- 331935
+# y <- 5811075
+
+# x <- 331905
+# y <- 5811055
+smooth_df <- smoothed_results[[1]]
+end_y <- ncol(smoothed_results[[1]])
+xy <- random_number(1, 1, end_y)
+poly_id <- xy[1]
+
+x <- smooth_df[["polygon_id"]][594] #505 # 594
+
+series_list <- lapply(smoothed_results, extract_series, x=x)
+
+series_list_summer <- lapply(series_list, function(df) {
+  # extract month as integer
+  m <- as.integer(format(df$date, "%m"))
+  y <- as.integer(format(df$date, "%y"))
+  # keep only May(5)–Aug(8)
+  df[m >= 1 & m <= 12,]
+})
 
 # 3) assemble a matrix of values (rows=dates, cols=reps)
-vals_mat <- sapply(series_list, `[[`, "value")
-dates   <- series_list[[1]]$date
+vals_mat <- sapply(series_list_summer, `[[`, "value")
+
+dates   <- series_list_summer[[1]]$date
+
+sen_row <- sen_val[sen_val$polygon_id == x, , drop = FALSE]
+sen_row <- sen_row[,-(1:2), drop=FALSE]
+sen_row <- as.numeric(sen_row)
+coln <- names(sen_val[2:132])
+
+summer_i <- sapply(coln, is_summer_file)
+summer_idx <- unname(summer_i)
+
+#sen_evi <- sen_val$evi
+#summer_idx <- sen_val$idx
 
 # 4) compute mean and sd
 mean_vals <- rowMeans(vals_mat, na.rm=TRUE)
@@ -121,13 +253,178 @@ sd_vals   <- apply(vals_mat, 1, sd,      na.rm=TRUE)
 summary_df <- data.frame(
   date  = dates,
   mean  = mean_vals,
-  upper = mean_vals + sd_vals,
-  lower = mean_vals - sd_vals
+  upper = mean_vals + 2 * sd_vals,
+  lower = mean_vals - 2 * sd_vals
 )
+upper <- summary_df$upper
+lower <- summary_df$lower
 
-# now you can plot:
-plot(summary_df$date, summary_df$mean, type="l")
-lines(summary_df$date, summary_df$upper, lty=2)
-lines(summary_df$date, summary_df$lower, lty=2)
+###################################STATISTICS#######################################################
+# helper: does one tree trigger?
+####################################################################################################
+
+# red_flag <- vector("numeric", length = length(summary_df$date))
+# for (i in 1:length(sen_evi)){
+#    if (sen_evi[[i]] <= lower[[i]] && summer_idx[[i]] == TRUE)
+#      red_flag[[i]] <- sen_evi[[i]]
+#  }
+#  red_flag
+
+n <- length(sen_row)
+red_flag_full <- rep(NA, n)  # full-length output
+
+i <- 1
+while (i <= (n - 2)) {
+   if (sen_row[i] <= lower[i] && summer_idx[i] == TRUE &&
+       sen_row[i + 1] <= lower[i + 1] && summer_idx[i + 1] == TRUE &&
+       sen_row[i + 2] <= lower[i + 2] && summer_idx[i + 2] == TRUE) {
+
+     red_flag_full[i]     <- sen_row[i]
+     red_flag_full[i + 1] <- sen_row[i + 1]
+     red_flag_full[i + 2] <- sen_row[i + 2]
+
+     i <- i + 3  # skip the sequence
+   } else {
+     i <- i + 1
+   }
+ }
+
+#############################PLOT################################################
+
+actual_df <- data.frame(date = summary_df$date, value = sen_row)
+flags_df  <- data.frame(date = summary_df$date, value = red_flag_full) %>%
+  filter(!is.na(value))
+if (nrow(flags_df) != 0){
+  ggplot() +
+    # Uncertainty band (lower–upper)
+    geom_ribbon(
+      data = summary_df,
+      aes(x = date, ymin = lower, ymax = upper,
+          fill = "Uncertainty band (lower–upper)"),
+      alpha = 0.4
+    ) +
+    # Baseline (mean) line
+    geom_line(
+      data = summary_df,
+      aes(x = date, y = mean, color = "Baseline (mean)"),
+      linewidth = 1
+    ) +
+    # Observed points (black)
+    geom_point(
+      data = actual_df,
+      aes(x = date, y = value, color = "Observed points")
+    ) +
+    # Flagged points (red)
+    geom_point(
+      data = flags_df,
+      aes(x = date, y = value, color = "Flagged points"),
+      shape = 19
+    ) +
+    # X-axis: every 3 months
+    scale_x_date(
+      breaks = seq(min(summary_df$date), max(summary_df$date), by = "3 months"),
+      date_labels = "%b %Y"
+    ) +
+    # Manual legends
+    scale_fill_manual(
+      name = "",
+      values = c("Uncertainty band (lower–upper)" = "blue")
+    ) +
+    scale_color_manual(
+      name = "",
+      values = c(
+        "Baseline (mean)" = "black",
+        "Observed points" = "green",
+        "Flagged points"  = "red"
+      )
+    ) +
+    labs(
+      x = "Date",
+      y = "Vegetationsindex (EVI)",
+      title = "Expected EVI vs Observed EVI"
+    ) +
+    theme_bw() +
+    theme(
+      axis.text.x = element_text(angle = 60, hjust = 1),
+      plot.title   = element_text(size = 9),   # smaller title
+      axis.title.y = element_text(size = 9),    # smaller y-axis label
+      legend.position = "bottom"
+    ) +
+    # Optional: keep consistent y-range
+    coord_cartesian(
+      ylim = c(-0.1, max(c(summary_df$upper, sen_row), na.rm = TRUE))
+    ) +
+    # Clean up legend display
+    guides(
+      color = guide_legend(override.aes = list(
+        linetype = c("solid", "blank", "blank"),
+        shape    = c(NA, 16, 19)
+      )),
+      fill = guide_legend(override.aes = list(alpha = 0.4))
+    )
+  
+} else{
+  ggplot() +
+    # Uncertainty band (lower–upper)
+    geom_ribbon(
+      data = summary_df,
+      aes(x = date, ymin = lower, ymax = upper,
+          fill = "Uncertainty band (lower–upper)"),
+      alpha = 0.4
+    ) +
+    # Baseline (mean) line
+    geom_line(
+      data = summary_df,
+      aes(x = date, y = mean, color = "Baseline (mean)"),
+      linewidth = 1
+    ) +
+    # Observed points (black)
+    geom_point(
+      data = actual_df,
+      aes(x = date, y = value, color = "Observed points")
+    ) +
+     
+    # X-axis: every 3 months
+    scale_x_date(
+      breaks = seq(min(summary_df$date), max(summary_df$date), by = "3 months"),
+      date_labels = "%b %Y"
+    ) +
+    # Manual legends
+    scale_fill_manual(
+      name = "",
+      values = c("Uncertainty band (lower–upper)" = "blue")
+    ) +
+    scale_color_manual(
+      name = "",
+      values = c(
+        "Baseline (mean)" = "black",
+        "Observed points" = "green"
+      )
+    ) +
+    labs(
+      x = "Date",
+      y = "Vegetationsindex (EVI)",
+      title = "Expected EVI vs Observed EVI"
+    ) +
+    theme_bw() +
+    theme(
+      axis.text.x = element_text(angle = 60, hjust = 1),
+      plot.title   = element_text(size = 9),   # smaller title
+      axis.title.y = element_text(size = 9),    # smaller y-axis label
+      legend.position = "bottom"
+    ) +
+    # Optional: keep consistent y-range
+    coord_cartesian(
+      ylim = c(-0.1, max(c(summary_df$upper, sen_row), na.rm = TRUE))
+    ) +
+    # Clean up legend display
+    guides(
+      color = guide_legend(override.aes = list(
+        linetype = c("solid", "blank"),
+        shape    = c(NA, 16)
+      )),
+      fill = guide_legend(override.aes = list(alpha = 0.4))
+    )
+}
 
 
