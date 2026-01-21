@@ -1,0 +1,64 @@
+library(sf)
+library(sfheaders)
+
+calculate_diameter <- function(polygon) {
+  # Get boundary (lines) of the polygon
+  boundary_line <- st_boundary(polygon)
+
+  # Convert boundary line into individual points
+  boundary_points <- st_cast(boundary_line, "POINT")
+  
+  # If there's only one point or none, distance is zero
+  if (nrow(boundary_points) < 2) {
+    return(0)
+  }
+  p <- as.matrix(boundary_points$geometry)
+  
+  # Compute all pairwise distances among boundary points
+  dist_matrix <- st_distance(boundary_points, boundary_points)
+  max_dist <- max(dist_matrix, na.rm = TRUE)
+  k <- which(dist_matrix == max_dist, arr.ind=T)
+  r <- k[1, 1]
+  c <- k[1, 2]
+  p1 <- p[r,]
+  p2 <- p[c,]
+  df <- rbind(p1, p2)
+  distance_poly <- as.data.frame(df)
+  mp <- c(distance_poly$V1$p1, distance_poly$V1$p2)
+  new_line <- st_cast(mp, "LINESTRING")
+  
+  # sfc <- st_sfc(new_line, crs = 32633)          # set the correct CRS
+  # new_obj <- st_sf(geometry = sfc)           # make it an sf object
+  #st_write(obj, "//home//nilraj.shrestha//R//lasdata//havel//test_line.shp", delete_dsn = TRUE)
+  
+  ## get the centre of the lines
+  centre <- sf::st_centroid( new_line )
+  coords <- sf::st_coordinates( new_line )
+  theta <- 90 * pi / 180 ## in radians
+  
+  rotate <- function( theta, p, centre ) {
+    new_x <- cos( theta ) * ( p[, 1] - centre[1] ) - sin( theta ) * ( p[, 2] - centre[2] ) + centre[1]
+    new_y <- sin( theta ) * ( p[, 1] - centre[1] ) + cos( theta ) * ( p[, 2] - centre[2] ) + centre[2] 
+    return( matrix( c( new_x, new_y ), ncol = 2 ) ) 
+  }
+  
+  ## calculate the rotated points
+  coords_new <- rotate( theta, coords, centre )
+  ## we've kept order in tact, so we can cbind the L1 id back on
+  coords_new <- cbind( coords_new, coords[, "L1"])
+  ## new sf object (using library(sfheaders) )
+  sf_new <- sfheaders::sf_linestring( obj = coords_new, linestring_id = 3)
+  sf::st_crs( sf_new ) <- sf::st_crs( polygon )
+  bound <- st_boundary(polygon)
+  bound_pts <- st_cast(bound, "POINT")
+  intersected_geom <- st_intersection(sf_new, bound)
+  get_coords <- sf::st_coordinates(intersected_geom$geometry)
+  point1 <- c(get_coords[1, ]["X"], get_coords[1, ]["Y"])
+  point2 <- c(get_coords[2, ]["X"], get_coords[2, ]["Y"])
+  euc_dist <- function(x1, x2) sqrt(sum((x1 - x2) ^ 2))
+  result <- euc_dist(point1, point2)
+  return(result)
+}
+
+polygon <- st_read("//home//nilraj.shrestha//R//lasdata//havel//test_dist.shp")
+distance <- calculate_diameter(polygon)
